@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from fuzzywuzzy import fuzz
+from flask_login import UserMixin, login_user, login_required, logout_user, LoginManager, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:@localhost/bookmanager'
@@ -68,6 +70,96 @@ class Book(db.Model):
             'year': self.year,
             'checked_out': self.checked_out
         }
+
+# Login Manager
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+# Models
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    role = db.Column(db.String(50), nullable=False)  # 'admin' or 'user'
+
+# User Loader
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# Routes
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    user = User.query.filter_by(username=data['username']).first()
+
+    if user and check_password_hash(user.password, data['password']):
+        login_user(user)
+        return jsonify({"message": "Login successful"})
+    return jsonify({"message": "Invalid credentials"}), 401
+
+@app.route('/logout', methods=['POST'])
+@login_required
+def logout():
+    logout_user()
+    return jsonify({"message": "Logged out successfully"})
+
+@app.route('/books', methods=['POST'])
+@login_required
+def add_book():
+    if current_user.role != 'admin':
+        return jsonify({"message": "Unauthorized"}), 403
+    data = request.json
+    new_book = Book(
+        title=data['title'],
+        author=data['author'],
+        genre=data.get('genre', ''),
+        description=data.get('description', ''),
+        is_checked_out=False
+    )
+    db.session.add(new_book)
+    db.session.commit()
+    return jsonify({"message": "Book added successfully"}), 201
+
+@app.route('/books', methods=['GET'])
+def get_books():
+    books = Book.query.all()
+    return jsonify([book.to_dict() for book in books])
+
+@app.route('/books/search', methods=['GET'])
+def search_books():
+    query = request.args.get('q', '')
+    results = []
+    for book in Book.query.all():
+        if fuzz.partial_ratio(query.lower(), book.title.lower()) > 70 or fuzz.partial_ratio(query.lower(), book.author.lower()) > 70:
+            results.append(book.to_dict())
+    recommended_books = sorted(results, key=lambda x: fuzz.partial_ratio(query.lower(), x['title'].lower()), reverse=True)
+    return jsonify(recommended_books)
+
+@app.route('/books/<book_id>/checkout', methods=['POST'])
+@login_required
+def checkout_book(book_id):
+    book = Book.query.get(book_id)
+    if not book:
+        return jsonify({"message": "Book not found"}), 404
+    if book.is_checked_out:
+        return jsonify({"message": "Book is already checked out"}), 400
+    book.is_checked_out = True
+    db.session.commit()
+    return jsonify({"message": "Book checked out successfully"})
+
+@app.route('/books/<book_id>/checkin', methods=['POST'])
+@login_required
+def checkin_book(book_id):
+    book = Book.query.get(book_id)
+    if not book:
+        return jsonify({"message": "Book not found"}), 404
+    if not book.is_checked_out:
+        return jsonify({"message": "Book is already checked in"}), 400
+    book.is_checked_out = False
+    db.session.commit()
+    return jsonify({"message": "Book checked in successfully"})
+
 
 @app.before_first_request
 def create_tables():
@@ -156,6 +248,7 @@ def search_books():
             results.append(book.to_dict())
     return jsonify(results)
 
+# Run the app
 if __name__ == '__main__':
     app.run(debug=True)
 
